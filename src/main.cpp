@@ -1,8 +1,13 @@
 #include <Arduino.h>
-#include <LiquidCrystal_I2C.h>
 #include <ThreeWire.h>
 #include <RtcDS1302.h>
 #include <string.h>
+#include <TM1637.h>
+
+#define CLK 11
+#define DIO 10
+
+TM1637 tm(CLK, DIO);
 
 void updateScreen();
 // void checkAlarms();
@@ -10,9 +15,6 @@ String formatTimePart(int part);
 void setMemory(RtcDS1302<ThreeWire>* rtc, const char* data);
 char* getMemory();
 // void buzz();
-
-LiquidCrystal_I2C lcd(0x27,16,2);
-
 
 const int upPin = 6;
 const int downPin = 7;
@@ -35,12 +37,18 @@ const int RST = 3;
 const int IO = 4;
 const int SCLK = 5;
 
+int hours = 0;
+int minutes = 0;
+
 const char* monthNames[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
 const char data[] = "Jan 01 1970";
 
+bool setTimeMode = false;
+bool second = true;
+bool comingBackToClock = true;
+
 RtcDateTime current;
-// RtcDateTime alarms[] = {RtcDateTime("Sep 07 2024", "00:00:00")};
 
 ThreeWire myWire(IO, SCLK, RST);
 RtcDS1302<ThreeWire> Rtc(myWire);
@@ -51,7 +59,7 @@ void setup() {
   pinMode(setPin, INPUT);
   pinMode(modePin, INPUT);
 
-  lcd.init();
+  tm.begin();
   pinMode(BUZZER_PIN, OUTPUT);
 
   Serial.begin(9600);
@@ -59,9 +67,6 @@ void setup() {
   Rtc.Begin();
 
   char* buff = getMemory();
-
-  Serial.print("Getting: ");
-  Serial.println(buff);  
 
   RtcDateTime dt = RtcDateTime(buff, "23:59:55");
   current = dt;
@@ -85,7 +90,7 @@ void setup() {
   updateScreen();
 }
 
-void setMemory() {
+void setDateOnMemory() {
     RtcDateTime now = Rtc.GetDateTime();
 
     // Prepare new date to be set into the mem
@@ -118,9 +123,6 @@ char* getMemory() {
 }
 
 void loop() {
-  if (mode == 0) {
-    updateScreen();
-  }
   if (digitalRead(upPin) == HIGH) {
     if (upPrev == false) {
       upPrev = true;
@@ -130,21 +132,36 @@ void loop() {
           counter = 0;
         }
         updateScreen();
+      } else if (mode == 2) {
+        if (hours == 23) {
+          hours = 0;
+        } else {
+          hours = hours + 1;
+        }
       }
       Serial.println(counter);
     }
   } else {
     upPrev = false;
   }
+  
   if (digitalRead(downPin) == HIGH) {
     if (downPrev == false) {
       downPrev = true;
       counter -= 1;
+      if (mode == 2) {
+        if (hours == 0) {
+          hours = 23;
+        } else {
+          hours = hours - 1;
+        }
+      }
       Serial.println(counter);
     }
   } else {
     downPrev = false;
   }
+
   if (digitalRead(setPin) == HIGH) {
     if (setPrev == false) {
       setPrev = true;
@@ -153,6 +170,7 @@ void loop() {
   } else {
     setPrev = false;
   }
+
   if (digitalRead(modePin) == HIGH) {
     if (modePrev == false) {
       modePrev = true;
@@ -163,94 +181,84 @@ void loop() {
         initial = true;
         mode = 0;
       }
+      if (mode == 2) {
+        RtcDateTime now = Rtc.GetDateTime();
+        hours = now.Hour();
+        minutes = now.Minute();
+      } else {
+        hours = 0;
+        minutes = 0;
+      }
+      Serial.print("mode=");
+      Serial.println(mode);
       updateScreen();
     }
   } else {
     modePrev = false;
   }
+
+  if (mode == 0 || mode == 2) {
+    updateScreen();
+  }
+
   // checkAlarms();
 }
 
-String formatTimePart(int part) {
-  if (part < 10) {
-    return "0" + String(part);
-  }
-  return String(part);
-}
-
 void updateScreen() {
+  RtcDateTime now = Rtc.GetDateTime();
+
   if (mode == 0) {
-    RtcDateTime now = Rtc.GetDateTime();
-    if (initial) {
-      lcd.clear();
-      lcd.backlight();
-
-      lcd.setCursor(2,0);
-      lcd.print("/");
-      lcd.setCursor(5,0);
-      lcd.print("/");
-
-      lcd.setCursor(2,1);
-      lcd.print(":");
-      lcd.setCursor(5,1);
-      lcd.print(":");
-
-      initial = false;
+    if (now.Minute() != current.Minute() || comingBackToClock) {
+      char time[4];
+      int c2 = sprintf(time, "%02d%02d", now.Hour(), now.Minute());
+      uint8_t timeCnt = sizeof(time);
+      String fmtTime = time;
+      tm.display(fmtTime);
+      comingBackToClock = true;
     }
 
-    // Prepare new date to be shown
-    char date[12];
-    int c1 = sprintf(date, "%s %02d %04d", monthNames[now.Month() - 1], now.Day(), now.Year());
-    uint8_t dateCnt = sizeof(date);
-
-    // Prepare new time to be shown
-    char time[8];
-    int c2 = sprintf(time, "%02d:%02d:%02d", now.Hour(), now.Minute(), now.Second());
-    uint8_t timeCnt = sizeof(time);
-
-    lcd.setCursor(0,0);
-    lcd.print(date);
-
-    lcd.setCursor(0,1);
-    lcd.print(time);
-
+    if (now.Second() != current.Second()) {
+      second = !second;
+      if (second) {
+        tm.colonOn();
+      } else {
+        tm.colonOff();
+      }
+    }
+    
     if (current.Day() != now.Day()) {
-        setMemory();
+        setDateOnMemory();
     }
 
     current = now;
+
   } else if (mode == 1) {
     if (alarms == 0) {
-      lcd.setCursor(0,0);
-      lcd.print("You have no     ");
-      lcd.setCursor(0,1);
-      lcd.print("Alarms set.     ");
+      tm.display("NO");
     } else {
       int index = 0;
       // There CANNOT be more than 99 alarms.
       if (counter + 2 <= alarms) {
         for (int i = counter + 1; i <= counter + 2; ++i) {
-          lcd.setCursor(0,index);
-          lcd.print("Alarm ");
-          lcd.setCursor(6,index);
-          lcd.print(i);
-          lcd.setCursor(6+String(i).length(),index);
-          lcd.print("        ");
+          char alarm[4] = "   ";
+          int c = sprintf(alarm, "AL-%02d", 1);
+          String formated = alarm;
+          tm.display(formated);
           index += 1;
         }
       } else {
-        lcd.setCursor(0,0);
-        lcd.print("Alarm ");
-        lcd.setCursor(6,0);
-        lcd.print(counter + 1);
-        lcd.setCursor(6+String(counter + 1).length(),0);
-        lcd.print("        ");
-        lcd.setCursor(0,1);
-        lcd.print("                ");
+        char alarm[4] = "   ";
+        int c = sprintf(alarm, "AL-%02d", 1);
+        String formated = alarm;
+        tm.display(formated);
       }
     }
   } else if (mode == 2) {
-    Serial.println("Case 2");
+    char time[4];
+    int c2 = sprintf(time, "%02d%02d", hours, minutes);
+    uint8_t timeCnt = sizeof(time);
+    String fmtTime = time;
+    tm.display(fmtTime);
   }
 }
 //}
